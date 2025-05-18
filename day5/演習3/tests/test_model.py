@@ -171,3 +171,98 @@ def test_model_reproducibility(sample_data, preprocessor):
     assert np.array_equal(
         predictions1, predictions2
     ), "モデルの予測結果に再現性がありません"
+
+
+def test_feature_importance(train_model):
+    """特徴量重要度を検証"""
+    model, X_test, _ = train_model
+
+    # RandomForestClassifierから特徴量重要度を取得
+    feature_importances = model.named_steps["classifier"].feature_importances_
+
+    # 重要度が0より大きいことを確認（少なくとも一部の特徴量が予測に貢献している）
+    assert np.any(feature_importances > 0), "すべての特徴量の重要度が0です"
+
+    # 特徴量重要度の合計が約1になることを確認（RandomForestの仕様）
+    assert np.isclose(
+        np.sum(feature_importances), 1.0
+    ), f"特徴量重要度の合計が1でありません: {np.sum(feature_importances)}"
+
+    # 上位の特徴量が一定の重要度を持つことを確認
+    top_importance = np.max(feature_importances)
+    assert (
+        top_importance >= 0.1
+    ), f"最も重要な特徴量の重要度が低すぎます: {top_importance}"
+
+
+def test_model_serialization(train_model):
+    """モデルのシリアライズとデシリアライズの整合性を検証"""
+    model, X_test, _ = train_model
+
+    # 予測結果を取得
+    original_predictions = model.predict(X_test)
+    original_proba = model.predict_proba(X_test)
+
+    # モデルを一度シリアライズしてから再度読み込む
+    with open("temp_model.pkl", "wb") as f:
+        pickle.dump(model, f)
+
+    with open("temp_model.pkl", "rb") as f:
+        loaded_model = pickle.load(f)
+
+    # 再読込したモデルで予測
+    loaded_predictions = loaded_model.predict(X_test)
+    loaded_proba = loaded_model.predict_proba(X_test)
+
+    # 予測結果が同じであることを確認
+    assert np.array_equal(
+        original_predictions, loaded_predictions
+    ), "シリアライズ前後で予測結果が異なります"
+    assert np.allclose(
+        original_proba, loaded_proba
+    ), "シリアライズ前後で予測確率が異なります"
+
+    # テスト用の一時ファイルを削除
+    if os.path.exists("temp_model.pkl"):
+        os.remove("temp_model.pkl")
+
+
+def test_model_robustness(train_model):
+    """異常値に対する予測安定性を検証"""
+    model, X_test, _ = train_model
+
+    # テスト用のデータフレームをコピー
+    X_anomaly = X_test.copy()
+
+    # 年齢に極端な値を設定
+    if "Age" in X_anomaly.columns:
+        X_anomaly.loc[0, "Age"] = 999  # 極端に高い年齢
+
+    # 料金に極端な値を設定
+    if "Fare" in X_anomaly.columns:
+        X_anomaly.loc[1, "Fare"] = 99999  # 極端に高い料金
+
+    # 負の値も試す
+    if "Fare" in X_anomaly.columns:
+        X_anomaly.loc[2, "Fare"] = -100  # 負の料金
+
+    try:
+        # 異常値を含むデータでも予測が実行できることを確認
+        predictions = model.predict(X_anomaly)
+        assert len(predictions) == len(
+            X_anomaly
+        ), "異常値を含むデータの予測数が不正です"
+
+        # 確率値が0-1の範囲内であることを確認
+        probabilities = model.predict_proba(X_anomaly)
+        assert np.all(probabilities >= 0) and np.all(
+            probabilities <= 1
+        ), "予測確率が0-1の範囲外です"
+
+        # 合計が1になることを確認
+        assert np.allclose(
+            np.sum(probabilities, axis=1), 1.0
+        ), "予測確率の合計が1になりません"
+
+    except Exception as e:
+        pytest.fail(f"異常値を含むデータの予測に失敗しました: {str(e)}")
